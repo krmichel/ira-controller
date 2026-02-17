@@ -18,6 +18,7 @@ package v1
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -222,6 +223,88 @@ var _ = Describe("Pod Webhook", func() {
 						return err == nil
 					}, 10*time.Second, 25*time.Millisecond).Should(BeTrue())
 					Expect(mutatedPod.Spec.Volumes).To(ContainElement(HaveField("VolumeSource.Secret.SecretName", "cert-name")))
+				})
+			})
+			Context("but already having the env var, init container, and volume", func() {
+				It("should not mutate the pod", func() {
+					ctx := context.Background()
+					pod := &v1.Pod{
+						ObjectMeta: metav1.ObjectMeta{
+							Annotations: map[string]string{
+								"ira.ontsys.com/trust-anchor": "ta",
+								"ira.ontsys.com/profile":      "p",
+								"ira.ontsys.com/role":         "c",
+							},
+							Name:      "idempotent",
+							Namespace: "default",
+						},
+						Spec: v1.PodSpec{
+							Containers: []v1.Container{
+								{
+									Name:  "my-container",
+									Image: "my-image",
+									Env: []v1.EnvVar{
+										{
+											Name:  "AWS_EC2_METADATA_SERVICE_ENDPOINT",
+											Value: "http://127.0.0.1:9912",
+										},
+									},
+								},
+							},
+							InitContainers: []v1.Container{
+								{
+									Name:    "ira",
+									Image:   CredentialHelperImage,
+									Command: []string{"aws_signing_helper"},
+									Args: []string{
+										"serve",
+										"--certificate",
+										"/ira-cert/tls.crt",
+										"--private-key",
+										"/ira-cert/tls.key",
+										"--trust-anchor-arn",
+										"foo",
+										"--profile-arn",
+										"bar",
+										"--role-arn",
+										"baz",
+										fmt.Sprintf("'--session-duration=%s'", SessionDuration),
+									},
+									VolumeMounts: []v1.VolumeMount{
+										{
+											Name:      "ira-cert-2",
+											MountPath: "/ira-cert-2",
+										},
+									},
+								},
+							},
+							Volumes: []v1.Volume{
+								{
+									Name: "ira-cert-2",
+									VolumeSource: v1.VolumeSource{
+										Secret: &v1.SecretVolumeSource{
+											SecretName: "idempotent-ira",
+										},
+									},
+								},
+							},
+						},
+					}
+					Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+
+					Eventually(func() *gbytes.Buffer {
+						return buffer
+					}, 5*time.Second, 25*time.Millisecond).Should(gbytes.Say("Attempting to patch pod"))
+
+					unmutatedPod := &v1.Pod{}
+					Eventually(func() bool {
+						err := k8sClient.Get(ctx, types.NamespacedName{
+							Namespace: "default",
+							Name:      "idempotent",
+						}, unmutatedPod)
+						return err == nil
+					}, 10*time.Second, 25*time.Millisecond).Should(BeTrue())
+					Expect(unmutatedPod).To(Equal(pod))
 				})
 			})
 		})
