@@ -90,14 +90,18 @@ func (p *podIraInjector) Handle(ctx context.Context, request admission.Request) 
 			pod.Spec.Volumes = make([]v1.Volume, 0)
 		}
 		secretName, _ := util.ControllerNameFromPod(pod)
-		pod.Spec.Volumes = append(pod.Spec.Volumes, v1.Volume{
-			Name: "ira-cert",
-			VolumeSource: v1.VolumeSource{
-				Secret: &v1.SecretVolumeSource{
-					SecretName: util.GetCertName(pod.Annotations, secretName),
+		if !slices.ContainsFunc(pod.Spec.Volumes, func(volume v1.Volume) bool {
+			return volume.Name == "ira-cert"
+		}) {
+			pod.Spec.Volumes = append(pod.Spec.Volumes, v1.Volume{
+				Name: "ira-cert",
+				VolumeSource: v1.VolumeSource{
+					Secret: &v1.SecretVolumeSource{
+						SecretName: util.GetCertName(pod.Annotations, secretName),
+					},
 				},
-			},
-		})
+			})
+		}
 
 		endpoint := "http://127.0.0.1:9911"
 		if util.MapContains(pod.Annotations, "ira.ontsys.com/metadata-endpoint-trailing-slash") && pod.Annotations["ira.ontsys.com/metadata-endpoint-trailing-slash"] != "" {
@@ -108,11 +112,15 @@ func (p *podIraInjector) Handle(ctx context.Context, request admission.Request) 
 			if c.Env == nil {
 				c.Env = make([]v1.EnvVar, 0)
 			}
-			c.Env = append(c.Env, v1.EnvVar{
-				Name:  "AWS_EC2_METADATA_SERVICE_ENDPOINT",
-				Value: endpoint,
-			})
-			pod.Spec.Containers[i] = c
+			if !slices.ContainsFunc(c.Env, func(envVar v1.EnvVar) bool {
+				return envVar.Name == "AWS_EC2_METADATA_SERVICE_ENDPOINT"
+			}) {
+				c.Env = append(c.Env, v1.EnvVar{
+					Name:  "AWS_EC2_METADATA_SERVICE_ENDPOINT",
+					Value: endpoint,
+				})
+				pod.Spec.Containers[i] = c
+			}
 		}
 
 		restartPolicyAlways := v1.ContainerRestartPolicyAlways
@@ -133,33 +141,37 @@ func (p *podIraInjector) Handle(ctx context.Context, request admission.Request) 
 			resources.Limits[v1.ResourceMemory] = resource.MustParse(CredentialHelperMemoryLimit)
 		}
 
-		pod.Spec.InitContainers = append(pod.Spec.InitContainers, v1.Container{
-			Name:    "ira",
-			Image:   CredentialHelperImage,
-			Command: []string{"aws_signing_helper"},
-			Args: []string{
-				"serve",
-				"--certificate",
-				"/ira-cert/tls.crt",
-				"--private-key",
-				"/ira-cert/tls.key",
-				"--trust-anchor-arn",
-				pod.Annotations["ira.ontsys.com/trust-anchor"],
-				"--profile-arn",
-				pod.Annotations["ira.ontsys.com/profile"],
-				"--role-arn",
-				pod.Annotations["ira.ontsys.com/role"],
-				fmt.Sprintf("'--session-duration=%s'", SessionDuration),
-			},
-			RestartPolicy: &restartPolicyAlways,
-			Resources:     resources,
-			VolumeMounts: []v1.VolumeMount{
-				{
-					Name:      "ira-cert",
-					MountPath: "/ira-cert",
+		if !slices.ContainsFunc(pod.Spec.InitContainers, func(container v1.Container) bool {
+			return container.Name == "ira"
+		}) {
+			pod.Spec.InitContainers = append(pod.Spec.InitContainers, v1.Container{
+				Name:    "ira",
+				Image:   CredentialHelperImage,
+				Command: []string{"aws_signing_helper"},
+				Args: []string{
+					"serve",
+					"--certificate",
+					"/ira-cert/tls.crt",
+					"--private-key",
+					"/ira-cert/tls.key",
+					"--trust-anchor-arn",
+					pod.Annotations["ira.ontsys.com/trust-anchor"],
+					"--profile-arn",
+					pod.Annotations["ira.ontsys.com/profile"],
+					"--role-arn",
+					pod.Annotations["ira.ontsys.com/role"],
+					fmt.Sprintf("'--session-duration=%s'", SessionDuration),
 				},
-			},
-		})
+				RestartPolicy: &restartPolicyAlways,
+				Resources:     resources,
+				VolumeMounts: []v1.VolumeMount{
+					{
+						Name:      "ira-cert",
+						MountPath: "/ira-cert",
+					},
+				},
+			})
+		}
 	}
 
 	marshaledpod, err := json.Marshal(pod)
@@ -170,7 +182,7 @@ func (p *podIraInjector) Handle(ctx context.Context, request admission.Request) 
 
 	podlog.Info("Attempting to patch pod", "pod", pod.Name, "pod namespace", pod.Namespace, "pod generate name", pod.GenerateName)
 
-	return admission.PatchResponseFromRaw(request.AdmissionRequest.Object.Raw, marshaledpod)
+	return admission.PatchResponseFromRaw(request.Object.Raw, marshaledpod)
 }
 
 // InjectDecoder injects the decoder.
